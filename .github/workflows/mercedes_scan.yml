@@ -1,0 +1,46 @@
+name: Mercedes Oldtimer Scanner
+
+on:
+  schedule:
+    - cron: '0 * * * *'  # elk uur
+  workflow_dispatch:       # handmatig testen via GitHub UI
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Playwright (voor optionele Facebook-scraping)
+        run: playwright install chromium --with-deps
+        continue-on-error: true
+
+      - name: Run Mercedes scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
+
+      - name: Commit updated seen_listings.json
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update seen_listings.json [skip ci]"
+          file_pattern: "data/seen_listings.json"
+          commit_user_name: "Mercedes Scanner Bot"
+          commit_user_email: "bot@noreply.github.com"
