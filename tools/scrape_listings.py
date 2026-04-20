@@ -723,12 +723,27 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                 pass
 
             auth_label = "ingelogd" if has_auth else "zonder login"
-            # Try specific pagelet first, then broader selector, then any item link
+
+            # Debug: log all unique href patterns to find correct selector
+            all_hrefs = page.evaluate("""
+                () => [...new Set(
+                    [...document.querySelectorAll('a[href]')]
+                    .map(a => a.getAttribute('href'))
+                    .filter(h => h && h.includes('marketplace'))
+                    .slice(0, 20)
+                )]
+            """)
+            print(f"  [fb] marketplace hrefs gevonden: {all_hrefs[:10]}")
+
+            # Try all known selector patterns
             cards = page.query_selector_all("div[data-pagelet='MarketplaceSearchResults'] a[href*='/marketplace/item/']")
             if not cards:
                 cards = page.query_selector_all("a[href*='/marketplace/item/']")
             if not cards:
                 cards = page.query_selector_all("[href*='/marketplace/item/']")
+            if not cards:
+                # Try any link containing numeric item IDs typical for FB marketplace
+                cards = page.query_selector_all("a[href*='marketplace']")
             print(f"  [fb] {len(cards)} item-links gevonden na scrollen")
             print(f"  [fb] {len(cards)} listings gevonden ({auth_label})")
             for card in cards[:30]:
