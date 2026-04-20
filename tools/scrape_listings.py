@@ -319,26 +319,105 @@ def _scrape_kleinanzeigen_cffi(query: str, max_year: int | None) -> list:
         return []
 
     slug = query.lower().replace(" ", "-").replace("_", "-")
-    url = (
+    page_url = (
         f"https://www.kleinanzeigen.de/s-{slug}/c216+autos.ez_i:,{max_year}/k0"
         if max_year
         else f"https://www.kleinanzeigen.de/s-{slug}/c216/k0"
     )
 
+    # Load page first to obtain session cookies, then hit the search API
     try:
-        resp = session.get(url, timeout=20)
-        if resp.status_code != 200:
-            return []
-        html = resp.text
-        if "DataDome" in html or "datadome" in html.lower():
-            return []
+        session.get(page_url, timeout=20)
     except Exception:
         return []
 
-    soup = BeautifulSoup(html, "lxml")
-    listings = _parse_kleinanzeigen_html(soup)
-    if listings:
-        print(f"  [kaz/cffi] {len(listings)} aanbiedingen gevonden")
+    # Internal search API — requires session cookies from page load
+    api_params = {
+        "categoryId": "216",
+        "query": query,
+        "pageSize": "50",
+        "sortField": "CREATION_DATE",
+        "sortDirection": "DESC",
+    }
+    if max_year:
+        api_params["maxConstructionYear"] = str(max_year)
+
+    for api_url in [
+        "https://gateway.kleinanzeigen.de/ads/v1/ads",
+        "https://www.kleinanzeigen.de/api/v1/ads",
+    ]:
+        try:
+            resp = session.get(
+                api_url,
+                params=api_params,
+                headers={"Accept": "application/json", "Referer": page_url},
+                timeout=15,
+            )
+            if resp.status_code == 200 and "json" in resp.headers.get("content-type", ""):
+                data = resp.json()
+                items = data.get("ads", data.get("listings", data.get("items", [])))
+                if items:
+                    listings = _parse_kleinanzeigen_api_items(items)
+                    print(f"  [kaz/api] {len(listings)} aanbiedingen via {api_url.split('/')[2]}")
+                    return listings
+        except Exception:
+            continue
+
+    # Fallback: parse SPA HTML (usually empty, but try)
+    try:
+        resp = session.get(page_url, timeout=20)
+        if resp.status_code == 200 and "DataDome" not in resp.text:
+            soup = BeautifulSoup(resp.text, "lxml")
+            listings = _parse_kleinanzeigen_html(soup)
+            if listings:
+                print(f"  [kaz/cffi] {len(listings)} aanbiedingen via HTML")
+                return listings
+    except Exception:
+        pass
+    return []
+
+
+def _parse_kleinanzeigen_api_items(items: list) -> list:
+    listings = []
+    for item in items[:50]:
+        try:
+            ad_id = str(item.get("id", item.get("adId", "")))
+            if not ad_id:
+                continue
+            title = item.get("title", "")[:100]
+            price_raw = item.get("price", {})
+            if isinstance(price_raw, dict):
+                price_eur = int(price_raw.get("amount", 0) or 0)
+                pt = (price_raw.get("type") or "").upper()
+                price_type = "fixed" if pt in ("FIXED", "NEGOTIABLE") or price_eur > 0 else "ask"
+            else:
+                price_eur, price_type = _parse_price_text(str(price_raw))
+            loc = item.get("location", {})
+            location = loc.get("city", loc.get("zipCode", "")) if isinstance(loc, dict) else ""
+            year = int(item.get("year", item.get("firstRegistrationYear", 0)) or 0)
+            if year == 0:
+                year = _extract_year_from_text(title)
+            mileage_raw = item.get("mileageInKm", item.get("mileage", 0))
+            mileage = int(re.sub(r"[^\d]", "", str(mileage_raw or 0)) or 0)
+            vip = item.get("url", item.get("link", ""))
+            item_url = vip if vip.startswith("http") else f"https://www.kleinanzeigen.de{vip}"
+            if not item_url or item_url == "https://www.kleinanzeigen.de":
+                item_url = f"https://www.kleinanzeigen.de/s-anzeige/{ad_id}"
+            listings.append({
+                "id": f"kaz:{ad_id}",
+                "platform": "kaz",
+                "title": title,
+                "price_eur": price_eur,
+                "price_type": price_type,
+                "year": year,
+                "mileage_km": mileage,
+                "url": item_url,
+                "location": location,
+                "image_url": "",
+                "scraped_at": _now(),
+            })
+        except Exception:
+            continue
     return listings
 
 
