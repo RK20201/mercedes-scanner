@@ -545,16 +545,20 @@ def _scrape_mobile_de(query: str, max_year: int | None, max_price: int | None) -
             page.on("response", on_response)
             page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)  # let consent modal appear
+            print(f"  [mde] pagina titel: {page.title()[:80]}")
 
             # Accept consent — try main frame + all iframes (Sourcepoint CMP uses iframes)
             _accept_consent_all_frames(page)
-            page.wait_for_timeout(4000)  # wait for listings to render after consent
 
-            # If still no links, try once more with a targeted wait
+            # Consent click may trigger page reload — wait for it to settle
             try:
-                page.wait_for_selector("a[href*='/fahrzeuge/details'], h2", timeout=8000)
+                page.wait_for_load_state("domcontentloaded", timeout=8000)
             except Exception:
                 pass
+            page.wait_for_timeout(4000)  # wait for listings to render
+
+            links_check = page.query_selector_all("a[href*='/fahrzeuge/details']")
+            print(f"  [mde] na consent: {len(links_check)} detail-links, titel: {page.title()[:60]}")
 
             if captured_json:
                 print(f"  [mde] {len(captured_json)} items via API interceptie")
@@ -691,6 +695,8 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                 except Exception:
                     continue
 
+            print(f"  [fb] pagina titel: {page.title()[:80]}")
+
             # Wait for marketplace items to appear
             try:
                 page.wait_for_selector("a[href*='/marketplace/item/']", timeout=10000)
@@ -698,6 +704,7 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                 pass
 
             auth_label = "ingelogd" if has_auth else "zonder login"
+            print(f"  [fb] url na laden: {page.url[:100]}")
             # Try specific pagelet first, then broader selector, then any item link
             cards = page.query_selector_all("div[data-pagelet='MarketplaceSearchResults'] a[href*='/marketplace/item/']")
             if not cards:
@@ -943,17 +950,17 @@ def scrape_all_platforms() -> list:
             all_listings.extend(filtered)
             _sleep()
 
-    print("  [profiel 3] NL belastingvrij (alle merken ≤ 1987, max €10.000)")
+    print("  [profiel 3] NL belastingvrij (alle merken ≤ 1987, max €7.000)")
     for scraper, name in [
-        (lambda: scrape_marktplaats_profile("auto", max_year=1987, max_price=10000), "marktplaats"),
-        (lambda: scrape_2dehands_profile("auto", max_year=1987, max_price=10000), "2dehands"),
-        (lambda: _scrape_autoscout24("", max_year=1987, max_price=10000), "autoscout24"),
+        (lambda: scrape_marktplaats_profile("auto", max_year=1987, max_price=7000), "marktplaats"),
+        (lambda: scrape_2dehands_profile("auto", max_year=1987, max_price=7000), "2dehands"),
+        (lambda: _scrape_autoscout24("", max_year=1987, max_price=7000), "autoscout24"),
     ]:
         results = scraper()
         filtered = [
             r for r in results
             if r["year"] > 0 and r["year"] <= 1987
-            and (r["price_eur"] <= 10000 or r["price_type"] != "fixed")
+            and (r["price_eur"] <= 7000 or r["price_type"] != "fixed")
             and not _is_parts_listing(r)
         ]
         for r in filtered:
