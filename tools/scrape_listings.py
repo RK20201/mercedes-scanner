@@ -225,6 +225,8 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
                 or page_props.get("initialState", {}).get("listings", {}).get("items", [])
             )
         print(f"  [as24] pageProps keys: {list(page_props.keys())[:8]}, listings: {len(raw_listings)}")
+        if raw_listings:
+            print(f"  [as24] eerste item keys: {list(raw_listings[0].keys())[:8]}")
     except Exception as e:
         print(f"  [as24] scrape failed: {e}")
         return []
@@ -259,6 +261,9 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
         except Exception:
             continue
 
+    if listings:
+        years = [l["year"] for l in listings]
+        print(f"  [as24] jaren in resultaten: {sorted(set(years))[:10]}")
     return listings
 
 
@@ -273,8 +278,9 @@ def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
         print("  [kaz] playwright not installed, skipping")
         return []
 
+    # No location code — search all of Germany
     if max_year:
-        url = f"https://www.kleinanzeigen.de/s-{query.lower().replace(' ', '-')}/c216l9352+autos.bj_i:,{max_year}/k0"
+        url = f"https://www.kleinanzeigen.de/s-{query.lower().replace(' ', '-')}/c216+autos.ez_i:,{max_year}/k0"
     else:
         url = f"https://www.kleinanzeigen.de/s-{query.lower().replace(' ', '-')}/c216/k0"
 
@@ -290,35 +296,50 @@ def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
             page.goto(url, timeout=30000, wait_until="domcontentloaded")
             page.wait_for_timeout(3000)
 
-            try:
-                page.click("#gdpr-banner-accept", timeout=3000)
-                page.wait_for_timeout(500)
-            except Exception:
-                pass
+            for consent_selector in [
+                "#gdpr-banner-accept",
+                "button[data-gdpr-action='accept']",
+                "[aria-label='Alle akzeptieren']",
+            ]:
+                try:
+                    page.click(consent_selector, timeout=2000)
+                    page.wait_for_timeout(500)
+                    break
+                except Exception:
+                    continue
 
             print(f"  [kaz] page title: {page.title()[:80]}")
 
-            articles = page.query_selector_all("article[data-adid]")
-            if not articles:
-                articles = page.query_selector_all("li[data-adid]")
-            if not articles:
-                articles = page.query_selector_all("[data-adid]")
-            print(f"  [kaz] {len(articles)} artikelen gevonden")
+            # New approach: find listing links directly (data-adid no longer in DOM)
+            links = page.query_selector_all("a[href*='/s-anzeige/']")
+            print(f"  [kaz] {len(links)} advertentielinks gevonden")
 
-            for article in articles[:30]:
+            seen_hrefs: set = set()
+            for link in links[:40]:
                 try:
-                    ad_id = article.get_attribute("data-adid") or ""
-                    title_el = article.query_selector("a.ellipsis")
-                    title = title_el.inner_text().strip() if title_el else ""
-                    price_el = article.query_selector("p.aditem-main--middle--price-shipping--price")
-                    price_text = price_el.inner_text().strip() if price_el else ""
-                    price_eur, price_type = _parse_price_text(price_text)
-                    link_el = article.query_selector("a[href*='/s-anzeige/']")
-                    href = link_el.get_attribute("href") if link_el else ""
-                    item_url = f"https://www.kleinanzeigen.de{href}" if href else ""
-                    location_el = article.query_selector("div.aditem-main--top--left")
-                    location = location_el.inner_text().strip() if location_el else ""
-                    year = _extract_year_from_text(title)
+                    href = link.get_attribute("href") or ""
+                    if not href or href in seen_hrefs:
+                        continue
+                    seen_hrefs.add(href)
+
+                    ad_id = href.strip("/").split("/")[-1]
+                    item_url = f"https://www.kleinanzeigen.de{href}" if not href.startswith("http") else href
+
+                    title = link.inner_text().split("\n")[0].strip()[:100]
+                    card_text = link.evaluate(
+                        "el => (el.closest('article') || el.closest('li') || "
+                        "el.parentElement.parentElement || el.parentElement).innerText"
+                    ) or title
+
+                    price_eur, price_type = _parse_price_text(card_text)
+                    year = _extract_year_from_text(title + " " + card_text)
+
+                    location = ""
+                    for line in card_text.split("\n"):
+                        stripped = line.strip()
+                        if stripped and len(stripped) > 2 and not stripped[0].isdigit():
+                            location = stripped[:50]
+                            break
 
                     if ad_id:
                         listings.append({
