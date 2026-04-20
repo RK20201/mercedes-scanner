@@ -301,15 +301,12 @@ def _cffi_session():
 
 def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
     """
-    Two-stage: curl_cffi (Chrome TLS fingerprint) first, then Firefox Playwright fallback.
-    DataDome blocks headless Chromium but curl_cffi + Firefox have better chances.
+    Kleinanzeigen is a React SPA protected by DataDome.
+    Organic listings are not accessible via automation (no API, no SSR data).
+    Firefox only returns 2 sponsored PLA ads (irrelevant to Mercedes search).
     """
-    # Stage 1: curl_cffi HTML parse (no JS execution needed if page SSRs data)
-    results = _scrape_kleinanzeigen_cffi(query, max_year)
-    if results:
-        return results
-    # Stage 2: Firefox Playwright (different fingerprint than Chromium)
-    return _scrape_kleinanzeigen_pw_firefox(query, max_year)
+    print("  [kaz] overgeslagen (DataDome blokkeert organische resultaten)")
+    return []
 
 
 def _scrape_kleinanzeigen_cffi(query: str, max_year: int | None) -> list:
