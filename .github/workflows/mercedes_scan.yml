@@ -28,7 +28,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install Playwright browsers
-        run: python -m playwright install chromium --with-deps
+        run: python -m playwright install chromium firefox --with-deps
         continue-on-error: true
 
       - name: Run Mercedes scanner

@@ -285,169 +285,222 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
 
 
 # ---------------------------------------------------------------------------
-# Kleinanzeigen.de  (Playwright — bypasses DataDome anti-bot)
+# Kleinanzeigen.de  (curl_cffi — mimics Chrome TLS to bypass DataDome)
 # ---------------------------------------------------------------------------
 
+def _cffi_session():
+    """curl_cffi session that impersonates Chrome (bypasses DataDome/Cloudflare JA3 checks)."""
+    from curl_cffi import requests as cfrequests
+    s = cfrequests.Session(impersonate="chrome110")
+    s.headers.update({
+        "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+    })
+    return s
+
+
 def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
-    # Try JSON API first (no browser needed)
-    results = _scrape_kleinanzeigen_api(query, max_year)
+    """
+    Two-stage: curl_cffi (Chrome TLS fingerprint) first, then Firefox Playwright fallback.
+    DataDome blocks headless Chromium but curl_cffi + Firefox have better chances.
+    """
+    # Stage 1: curl_cffi HTML parse (no JS execution needed if page SSRs data)
+    results = _scrape_kleinanzeigen_cffi(query, max_year)
     if results:
         return results
-    # Fall back to Playwright with iframe-aware consent handling
-    return _scrape_kleinanzeigen_pw(query, max_year)
+    # Stage 2: Firefox Playwright (different fingerprint than Chromium)
+    return _scrape_kleinanzeigen_pw_firefox(query, max_year)
 
 
-def _scrape_kleinanzeigen_api(query: str, max_year: int | None) -> list:
-    session = _session()
-    params = {
-        "q": query,
-        "c": "216",
-        "sortBy": "SORT_INDEX",
-        "sortOrder": "DECREASING",
-        "pageSize": "30",
-    }
-    if max_year:
-        params["maxFirstRegistrationYear"] = str(max_year)
+def _scrape_kleinanzeigen_cffi(query: str, max_year: int | None) -> list:
     try:
-        resp = session.get("https://www.kleinanzeigen.de/lrp/api/search", params=params, timeout=15)
-        if resp.status_code != 200 or "listings" not in resp.text:
+        session = _cffi_session()
+    except ImportError:
+        return []
+
+    slug = query.lower().replace(" ", "-").replace("_", "-")
+    url = (
+        f"https://www.kleinanzeigen.de/s-{slug}/c216+autos.ez_i:,{max_year}/k0"
+        if max_year
+        else f"https://www.kleinanzeigen.de/s-{slug}/c216/k0"
+    )
+
+    try:
+        resp = session.get(url, timeout=20)
+        if resp.status_code != 200:
             return []
-        data = resp.json()
+        html = resp.text
+        if "DataDome" in html or "datadome" in html.lower():
+            return []
     except Exception:
         return []
 
-    listings = []
-    for item in data.get("listings", []):
-        try:
-            price_info = item.get("priceInfo", {})
-            price_cents = price_info.get("priceCents", 0) or 0
-            price_type_raw = (price_info.get("priceType") or "UNKNOWN").upper()
-            price_type = "fixed" if price_type_raw == "FIXED" else "ask" if "BID" in price_type_raw else "unknown"
-
-            attrs = {a["key"]: a.get("value", "") for a in item.get("attributes", [])}
-            year = int(attrs.get("constructionYear", "0") or 0)
-            mileage_str = attrs.get("mileage", "0")
-            mileage = int(re.sub(r"[^\d]", "", mileage_str) or 0)
-
-            item_id = str(item.get("itemId", ""))
-            vip_url = item.get("vipUrl", "")
-            url = vip_url if vip_url.startswith("http") else f"https://www.kleinanzeigen.de{vip_url}"
-            images = item.get("imageUrls", [])
-
-            listings.append({
-                "id": f"kaz:{item_id}",
-                "platform": "kaz",
-                "title": item.get("title", ""),
-                "description": item.get("description", "") or item.get("shortDescription", ""),
-                "price_eur": price_cents // 100,
-                "price_type": price_type,
-                "year": year,
-                "mileage_km": mileage,
-                "url": url,
-                "location": item.get("location", {}).get("cityName", ""),
-                "image_url": images[0] if images else "",
-                "scraped_at": _now(),
-            })
-        except Exception:
-            continue
+    soup = BeautifulSoup(html, "lxml")
+    listings = _parse_kleinanzeigen_html(soup)
+    if listings:
+        print(f"  [kaz/cffi] {len(listings)} aanbiedingen gevonden")
     return listings
 
 
-def _scrape_kleinanzeigen_pw(query: str, max_year: int | None) -> list:
+def _scrape_kleinanzeigen_pw_firefox(query: str, max_year: int | None) -> list:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("  [kaz] playwright not installed, skipping")
         return []
 
-    if max_year:
-        url = f"https://www.kleinanzeigen.de/s-{query.lower().replace(' ', '-')}/c216+autos.ez_i:,{max_year}/k0"
-    else:
-        url = f"https://www.kleinanzeigen.de/s-{query.lower().replace(' ', '-')}/c216/k0"
+    slug = query.lower().replace(" ", "-").replace("_", "-")
+    url = (
+        f"https://www.kleinanzeigen.de/s-{slug}/c216+autos.ez_i:,{max_year}/k0"
+        if max_year
+        else f"https://www.kleinanzeigen.de/s-{slug}/c216/k0"
+    )
+
+    captured_json: list = []
+
+    def on_response(response):
+        try:
+            if "kleinanzeigen.de" not in response.url or response.status != 200:
+                return
+            if "json" not in response.headers.get("content-type", ""):
+                return
+            data = response.json()
+            if not isinstance(data, dict):
+                return
+            for key in ("ads", "listings", "items", "results"):
+                val = data.get(key)
+                if isinstance(val, list) and val:
+                    captured_json.extend(val)
+                    return
+        except Exception:
+            pass
 
     listings = []
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent=HEADERS["User-Agent"], locale="de-DE")
+            browser = p.firefox.launch(headless=True)
+            context = browser.new_context(locale="de-DE")
             page = context.new_page()
-            page.goto(url, timeout=30000, wait_until="load")
-            page.wait_for_timeout(2000)
-
-            # Handle consent — check all frames (banner may be in iframe)
-            for frame in page.frames:
-                for selector in ["#gdpr-banner-accept", "button[data-gdpr-action='accept']"]:
-                    try:
-                        frame.click(selector, timeout=1000)
-                        page.wait_for_timeout(1000)
-                        break
-                    except Exception:
-                        continue
-            # Also try by text in any frame
-            for frame in page.frames:
-                try:
-                    import re as _re
-                    frame.get_by_text(_re.compile(r"akzeptier|accept all", _re.I)).first.click(timeout=1000)
-                    page.wait_for_timeout(1000)
-                    break
-                except Exception:
-                    continue
+            page.on("response", on_response)
+            page.goto(url, timeout=30000, wait_until="domcontentloaded")
 
             try:
-                page.wait_for_selector("a[href*='/s-anzeige/']", timeout=8000)
+                page.wait_for_selector("article, a[href*='/s-anzeige/']", timeout=10000)
+            except Exception:
+                page.wait_for_timeout(5000)
+
+            # Accept DataDome consent
+            try:
+                page.click("#gdpr-banner-accept", timeout=3000)
+                page.wait_for_timeout(3000)
             except Exception:
                 pass
 
-            links = page.query_selector_all("a[href*='/s-anzeige/']")
-            print(f"  [kaz/pw] {len(links)} links gevonden")
-
-            seen_hrefs: set = set()
-            for link in links[:40]:
-                try:
-                    href = link.get_attribute("href") or ""
-                    if not href or href in seen_hrefs:
+            if captured_json:
+                print(f"  [kaz/pw] {len(captured_json)} items via API interceptie")
+                for item in captured_json[:40]:
+                    try:
+                        ad_id = str(item.get("id", item.get("adId", "")))
+                        if not ad_id:
+                            continue
+                        title = item.get("title", "")[:100]
+                        price_raw = item.get("price", {})
+                        if isinstance(price_raw, dict):
+                            price_eur = int(price_raw.get("amount", 0) or 0)
+                            pt = (price_raw.get("type") or "").upper()
+                            price_type = "fixed" if pt == "FIXED" or price_eur > 0 else "ask"
+                        else:
+                            price_eur, price_type = _parse_price_text(str(price_raw))
+                        loc = item.get("location", {})
+                        location = loc.get("city", loc.get("zipCode", "")) if isinstance(loc, dict) else ""
+                        year = int(item.get("year", item.get("firstRegistrationYear", 0)) or 0)
+                        if year == 0:
+                            year = _extract_year_from_text(title)
+                        vip = item.get("url", item.get("link", ""))
+                        item_url = vip if vip.startswith("http") else f"https://www.kleinanzeigen.de{vip}"
+                        listings.append({"id": f"kaz:{ad_id}", "platform": "kaz", "title": title, "price_eur": price_eur, "price_type": price_type, "year": year, "mileage_km": 0, "url": item_url, "location": location, "image_url": "", "scraped_at": _now()})
+                    except Exception:
                         continue
-                    seen_hrefs.add(href)
-                    ad_id = href.strip("/").split("/")[-1]
-                    item_url = f"https://www.kleinanzeigen.de{href}" if not href.startswith("http") else href
-                    title = link.inner_text().split("\n")[0].strip()[:100]
-                    card_text = link.evaluate(
-                        "el => (el.closest('article') || el.closest('li') || "
-                        "el.parentElement.parentElement || el.parentElement).innerText"
-                    ) or title
-                    price_eur, price_type = _parse_price_text(card_text)
-                    year = _extract_year_from_text(title + " " + card_text)
-                    if ad_id:
-                        listings.append({
-                            "id": f"kaz:{ad_id}",
-                            "platform": "kaz",
-                            "title": title,
-                            "price_eur": price_eur,
-                            "price_type": price_type,
-                            "year": year,
-                            "mileage_km": 0,
-                            "url": item_url,
-                            "location": "",
-                            "image_url": "",
-                            "scraped_at": _now(),
-                        })
-                except Exception:
-                    continue
+            else:
+                # DOM fallback: parse the rendered HTML
+                content = page.content()
+                soup = BeautifulSoup(content, "lxml")
+                listings = _parse_kleinanzeigen_html(soup)
+                print(f"  [kaz/pw] {len(listings)} DOM listings gevonden")
+
             browser.close()
     except Exception as e:
         print(f"  [kaz/pw] scrape failed: {e}")
     return listings
 
 
+def _parse_kleinanzeigen_html(soup: "BeautifulSoup") -> list:
+    listings = []
+    articles = soup.select("article.aditem, article[data-adid], li.ad-listitem article")
+    for article in articles[:40]:
+        try:
+            ad_id = article.get("data-adid", "")
+            if not ad_id:
+                link = article.select_one("a[href*='/s-anzeige/']")
+                if link:
+                    m = re.search(r"/(\d+)$", link.get("href", ""))
+                    ad_id = m.group(1) if m else ""
+            if not ad_id:
+                continue
+            title_el = article.select_one(".ellipsis, h2, .aditem-main--top--left")
+            title = title_el.get_text(strip=True)[:100] if title_el else ""
+            link_el = article.select_one("a[href*='/s-anzeige/']")
+            href = link_el.get("href", "") if link_el else ""
+            item_url = f"https://www.kleinanzeigen.de{href}" if href and not href.startswith("http") else href
+            card_text = article.get_text(" ")
+            price_eur, price_type = _parse_price_text(card_text)
+            year = _extract_year_from_text(title + " " + card_text)
+            m_km = re.search(r"([\d.,]+)\s*km", card_text)
+            mileage = int(re.sub(r"[^\d]", "", m_km.group(1)) or 0) if m_km else 0
+            location_el = article.select_one(".aditem-main--top--right, .aditem-details")
+            location = location_el.get_text(strip=True)[:50] if location_el else ""
+            listings.append({"id": f"kaz:{ad_id}", "platform": "kaz", "title": title, "price_eur": price_eur, "price_type": price_type, "year": year, "mileage_km": mileage, "url": item_url, "location": location, "image_url": "", "scraped_at": _now()})
+        except Exception:
+            continue
+
+    if not listings:
+        seen: set = set()
+        for link in soup.select("a[href*='/s-anzeige/']")[:40]:
+            try:
+                href = link.get("href", "")
+                if not href or href in seen:
+                    continue
+                seen.add(href)
+                m = re.search(r"/(\d+)$", href)
+                ad_id = m.group(1) if m else ""
+                if not ad_id:
+                    continue
+                item_url = f"https://www.kleinanzeigen.de{href}" if not href.startswith("http") else href
+                card_text = link.get_text(" ")
+                price_eur, price_type = _parse_price_text(card_text)
+                year = _extract_year_from_text(card_text)
+                listings.append({"id": f"kaz:{ad_id}", "platform": "kaz", "title": card_text.split("\n")[0].strip()[:100], "price_eur": price_eur, "price_type": price_type, "year": year, "mileage_km": 0, "url": item_url, "location": "", "image_url": "", "scraped_at": _now()})
+            except Exception:
+                continue
+    return listings
+
+
 # ---------------------------------------------------------------------------
-# Mobile.de  (HTML)
+# Mobile.de  (Playwright Firefox — bypasses Akamai Bot Manager)
 # ---------------------------------------------------------------------------
 
 def _scrape_mobile_de(query: str, max_year: int | None, max_price: int | None) -> list:
-    session = _session()
-    session.headers["Referer"] = "https://www.mobile.de/"
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [mde] playwright not installed, skipping")
+        return []
 
-    params = {"isSearchRequest": "true", "sortOption.sortBy": "creationTime", "sortOption.sortOrder": "DESCENDING"}
+    params = {
+        "isSearchRequest": "true",
+        "sortOption.sortBy": "creationTime",
+        "sortOption.sortOrder": "DESCENDING",
+    }
     if query.lower() in ("mercedes", "mercedes-benz"):
         params["makeModelVariant1.makeId"] = "17200"
     else:
@@ -457,48 +510,132 @@ def _scrape_mobile_de(query: str, max_year: int | None, max_price: int | None) -
     if max_price:
         params["maxPrice.EUR"] = str(max_price)
 
-    _sleep()
-    try:
-        resp = session.get("https://suchen.mobile.de/fahrzeuge/search.html", params=params, timeout=20)
-        if resp.status_code == 403:
-            print("  [mobile.de] 403 blocked, skipping")
-            return []
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-    except Exception as e:
-        print(f"  [mobile.de] scrape failed: {e}")
-        return []
+    from urllib.parse import urlencode
+    search_url = "https://suchen.mobile.de/fahrzeuge/search.html?" + urlencode(params)
+
+    captured_json: list = []
+
+    def on_response(response):
+        try:
+            if "mobile.de" not in response.url or response.status != 200:
+                return
+            if "json" not in response.headers.get("content-type", ""):
+                return
+            data = response.json()
+            if not isinstance(data, dict):
+                return
+            # Look for search results in common keys
+            for key in ("data", "items", "listings", "results", "ads", "searchResults"):
+                val = data.get(key)
+                if isinstance(val, list) and val:
+                    captured_json.extend(val)
+                    return
+                if isinstance(val, dict):
+                    for sub in ("items", "listings", "ads"):
+                        sub_val = val.get(sub)
+                        if isinstance(sub_val, list) and sub_val:
+                            captured_json.extend(sub_val)
+                            return
+        except Exception:
+            pass
 
     listings = []
-    for card in soup.select("div[data-listing-id]"):
-        try:
-            listing_id = card.get("data-listing-id", "")
-            title_el = card.select_one("strong.h3--mobile, h3.u-truncate-text, .h3--mobile")
-            title = title_el.get_text(strip=True) if title_el else ""
-            price_el = card.select_one("span[data-testid='price'], .price-rating, .u-block.u-margin-bottom-9")
-            price_text = price_el.get_text(strip=True) if price_el else ""
-            price_eur, price_type = _parse_price_text(price_text)
-            link_el = card.select_one("a[href*='/fahrzeuge/']")
-            href = link_el.get("href", "") if link_el else ""
-            url = f"https://www.mobile.de{href}" if href and not href.startswith("http") else href
-            year = _extract_year_from_text(title + " " + card.get_text())
+    try:
+        with sync_playwright() as p:
+            browser = p.firefox.launch(headless=True)
+            context = browser.new_context(locale="de-DE")
+            page = context.new_page()
+            page.on("response", on_response)
+            page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
 
-            listings.append({
-                "id": f"mde:{listing_id}",
-                "platform": "mobile.de",
-                "title": title,
-                "price_eur": price_eur,
-                "price_type": price_type,
-                "year": year,
-                "mileage_km": 0,
-                "url": url,
-                "location": "",
-                "image_url": "",
-                "scraped_at": _now(),
-            })
-        except Exception:
-            continue
+            # Wait for listings to render
+            try:
+                page.wait_for_selector("h2, a[href*='/fahrzeuge/details']", timeout=10000)
+            except Exception:
+                page.wait_for_timeout(5000)
 
+            # Accept consent if present
+            try:
+                page.evaluate("""
+                    () => document.querySelectorAll('button').forEach(b => {
+                        if (/alle akzept|accept all|alle.*cookie/i.test(b.textContent)) b.click();
+                    })
+                """)
+                page.wait_for_timeout(1500)
+            except Exception:
+                pass
+
+            if captured_json:
+                print(f"  [mde] {len(captured_json)} items via API interceptie")
+                for item in captured_json[:40]:
+                    try:
+                        listing_id = str(item.get("id", item.get("listingId", "")))
+                        title = item.get("title", item.get("name", ""))[:100]
+                        price_raw = item.get("price", item.get("grossPrice", {}))
+                        if isinstance(price_raw, dict):
+                            price_eur = int(re.sub(r"[^\d]", "", str(price_raw.get("amount", price_raw.get("value", 0)) or 0)) or 0)
+                            price_type = "fixed" if price_eur > 0 else "ask"
+                        else:
+                            price_eur, price_type = _parse_price_text(str(price_raw))
+                        year_raw = item.get("year", item.get("firstRegistrationYear", 0))
+                        year = int(year_raw or 0)
+                        if year == 0:
+                            year = _extract_year_from_text(title)
+                        mileage_raw = item.get("mileage", item.get("mileageInKm", 0))
+                        mileage = int(re.sub(r"[^\d]", "", str(mileage_raw or 0)) or 0)
+                        vip = item.get("url", item.get("link", ""))
+                        item_url = vip if vip.startswith("http") else f"https://www.mobile.de{vip}"
+                        loc = item.get("location", item.get("seller", {}) or {})
+                        location = loc.get("city", loc.get("zip", "")) if isinstance(loc, dict) else ""
+                        if listing_id:
+                            listings.append({"id": f"mde:{listing_id}", "platform": "mde", "title": title, "price_eur": price_eur, "price_type": price_type, "year": year, "mileage_km": mileage, "url": item_url, "location": location, "image_url": "", "scraped_at": _now()})
+                    except Exception:
+                        continue
+            else:
+                # DOM fallback: extract from rendered listing links
+                link_els = page.query_selector_all("a[href*='/fahrzeuge/details']")
+                print(f"  [mde] geen API data, {len(link_els)} DOM detail-links")
+                seen: set = set()
+                for link in link_els[:40]:
+                    try:
+                        href = link.get_attribute("href") or ""
+                        if not href or href in seen:
+                            continue
+                        seen.add(href)
+                        item_url = f"https://www.mobile.de{href}" if not href.startswith("http") else href
+                        m_id = re.search(r"/(\d+)\.html", href)
+                        listing_id = m_id.group(1) if m_id else ""
+                        if not listing_id:
+                            continue
+                        # Walk up to find the containing article/card
+                        card_text = page.evaluate(
+                            "el => { let p = el; for (let i=0; i<5; i++) { p = p.parentElement; if (!p) break; if (p.tagName === 'ARTICLE' || p.tagName === 'LI') return p.innerText; } return el.innerText; }",
+                            link
+                        ) or link.inner_text()
+                        title = card_text.split("\n")[0].strip()[:100]
+                        price_eur, price_type = _parse_price_text(card_text)
+                        year = _extract_year_from_text(card_text)
+                        m_km = re.search(r"([\d.,]+)\s*km", card_text)
+                        mileage = int(re.sub(r"[^\d]", "", m_km.group(1)) or 0) if m_km else 0
+                        listings.append({
+                            "id": f"mde:{listing_id}",
+                            "platform": "mde",
+                            "title": title,
+                            "price_eur": price_eur,
+                            "price_type": price_type,
+                            "year": year,
+                            "mileage_km": mileage,
+                            "url": item_url,
+                            "location": "",
+                            "image_url": "",
+                            "scraped_at": _now(),
+                        })
+                    except Exception:
+                        continue
+            browser.close()
+    except Exception as e:
+        print(f"  [mde] scrape failed: {e}")
+    print(f"  [mde] {len(listings)} aanbiedingen gevonden")
     return listings
 
 
@@ -525,9 +662,7 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
         except Exception as e:
             print(f"  [fb] failed to decode FB_AUTH_STATE: {e}")
 
-    if not os.path.exists(auth_state_path):
-        print("  [fb] auth state not found, skipping")
-        return []
+    has_auth = os.path.exists(auth_state_path)
 
     try:
         from playwright.sync_api import sync_playwright
@@ -541,15 +676,29 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(storage_state=auth_state_path)
+            context = browser.new_context(storage_state=auth_state_path) if has_auth else browser.new_context(user_agent=HEADERS["User-Agent"])
             page = context.new_page()
             page.goto(
                 "https://www.facebook.com/marketplace/search/"
                 "?query=mercedes%20oldtimer&sortBy=creation_time_descend",
                 timeout=30000,
             )
-            page.wait_for_timeout(3000)
+            page.wait_for_timeout(4000)
+
+            # Dismiss login/cookie dialogs if present
+            for sel in ["[aria-label='Close']", "[data-testid='cookie-policy-manage-dialog-accept-button']",
+                        "button:has-text('Alle accepteren')", "button:has-text('Only allow essential')"]:
+                try:
+                    page.click(sel, timeout=1500)
+                    page.wait_for_timeout(500)
+                except Exception:
+                    continue
+
+            auth_label = "ingelogd" if has_auth else "zonder login"
             cards = page.query_selector_all("div[data-pagelet='MarketplaceSearchResults'] a[href*='/marketplace/item/']")
+            if not cards:
+                cards = page.query_selector_all("a[href*='/marketplace/item/']")
+            print(f"  [fb] {len(cards)} listings gevonden ({auth_label})")
             for card in cards[:30]:
                 try:
                     href = card.get_attribute("href") or ""
