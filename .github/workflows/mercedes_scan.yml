@@ -29,6 +29,7 @@ jobs:
 
       - name: Install Playwright browsers
         run: python -m playwright install chromium --with-deps
+        continue-on-error: true
 
       - name: Run Mercedes scanner
         env:
