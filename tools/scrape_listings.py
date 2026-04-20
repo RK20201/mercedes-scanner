@@ -19,6 +19,73 @@ HEADERS = {
 
 OM_ENGINES = ["OM605", "OM606", "OM612", "OM613"]
 
+# Mercedes model/chassis codes → (min_year, max_year)
+MERCEDES_MODEL_YEARS = {
+    "w108": (1965, 1972), "w109": (1965, 1972),
+    "w111": (1959, 1971), "w112": (1959, 1967),
+    "w113": (1963, 1971), "pagode": (1963, 1971),
+    "heckflosse": (1959, 1971),
+    "w114": (1968, 1976), "w115": (1968, 1976),
+    "w116": (1972, 1980),
+    "w123": (1975, 1985),
+    "w124": (1984, 1997),
+    "w126": (1979, 1991),
+    "w140": (1991, 1998),
+    "w201": (1982, 1993), "190e": (1982, 1993), "190d": (1982, 1993),
+    "w202": (1993, 2000),
+    "w210": (1995, 2002),
+    "w460": (1979, 1991), "w461": (1992, 2015), "w463": (1989, 2018),
+    "r107": (1971, 1989),
+    "r129": (1989, 2001),
+    "om601": (1983, 2000), "om602": (1985, 2000), "om603": (1984, 1994),
+    "om604": (1993, 1997), "om605": (1993, 2000), "om606": (1993, 1999),
+    "om612": (1999, 2005), "om613": (1999, 2005),
+    "200d": (1975, 1993), "200e": (1984, 1992),
+    "220d": (1968, 1976), "220e": (1992, 1996),
+    "230e": (1980, 1989), "230d": (1975, 1985), "230g": (1979, 1994),
+    "240d": (1974, 1985),
+    "250d": (1984, 1997),
+    "260e": (1984, 1992),
+    "280e": (1975, 1985), "280se": (1965, 1972), "280sl": (1967, 1971),
+    "300d": (1975, 1985), "300e": (1984, 1993), "300td": (1975, 1986),
+    "300sel": (1965, 1973), "300sl": (1989, 2001),
+    "320e": (1992, 1997),
+    "350se": (1972, 1980), "350sl": (1971, 1980),
+    "380se": (1979, 1985), "380sl": (1979, 1986),
+    "420se": (1985, 1991),
+    "450se": (1972, 1980), "450sl": (1971, 1980),
+    "500e": (1991, 1995), "500se": (1979, 1991), "500sl": (1989, 2001),
+    "560se": (1985, 1991), "560sel": (1985, 1991),
+    "600sel": (1991, 1998),
+    "g-klasse": (1979, 2023), "g klasse": (1979, 2023), "gklasse": (1979, 2023),
+    "g-class": (1979, 2023), "230ge": (1979, 1994), "300gd": (1979, 1994),
+    "500ge": (1993, 1999),
+}
+
+
+def _estimate_year_from_title(title: str) -> int:
+    """
+    Tries to infer the build year from a Mercedes model name or chassis code
+    in the listing title. Returns the midpoint year of the model range, or 0
+    if nothing is recognised.
+    For models that span across 1998 (e.g. W202 1993-2000) the min_year is
+    returned so the listing is not wrongly excluded.
+    """
+    t = title.lower()
+    best = None
+    for code, (y_min, y_max) in MERCEDES_MODEL_YEARS.items():
+        if re.search(r'\b' + re.escape(code) + r'\b', t):
+            if best is None or y_min < best[0]:
+                best = (y_min, y_max)
+    if best is None:
+        return 0
+    y_min, y_max = best
+    # If the whole range is before 1999, use midpoint
+    if y_max <= 1998:
+        return (y_min + y_max) // 2
+    # Range straddles 1998 — use min_year so it passes the ≤1998 filter
+    return y_min
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -38,15 +105,16 @@ def _session() -> requests.Session:
 # Marktplaats / 2dehands  (shared Adevinta platform)
 # ---------------------------------------------------------------------------
 
-def _scrape_adevinta(base_url: str, prefix: str, query: str, max_year: int | None, max_price: int | None) -> list:
+def _scrape_adevinta(base_url: str, prefix: str, query: str, max_year: int | None, max_price: int | None, category_id: str | None = None) -> list:
     session = _session()
     params = {
-        "l1CategoryId": "91",
         "query": query,
         "sortBy": "SORT_INDEX",
         "sortOrder": "DECREASING",
         "limit": "30",
     }
+    if category_id:
+        params["l1CategoryId"] = category_id
     if max_year:
         params["attributeRanges[]"] = f"constructionYear:::{max_year}"
     if max_price:
@@ -89,6 +157,7 @@ def _scrape_adevinta(base_url: str, prefix: str, query: str, max_year: int | Non
                 "id": f"{prefix}:{item_id}",
                 "platform": prefix,
                 "title": item.get("title", ""),
+                "description": item.get("description", "") or item.get("shortDescription", ""),
                 "price_eur": price_cents // 100,
                 "price_type": price_type,
                 "year": year,
@@ -190,61 +259,74 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
 
 
 # ---------------------------------------------------------------------------
-# Kleinanzeigen.de  (HTML, DataDome — graceful fail)
+# Kleinanzeigen.de  (Playwright — bypasses DataDome anti-bot)
 # ---------------------------------------------------------------------------
 
 def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
-    session = _session()
-    session.headers["Referer"] = "https://www.kleinanzeigen.de/"
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("  [kaz] playwright not installed, skipping")
+        return []
 
     if max_year:
         url = f"https://www.kleinanzeigen.de/s-{query.lower().replace(' ', '-')}/c216l9352+autos.bj_i:,{max_year}/k0"
     else:
         url = f"https://www.kleinanzeigen.de/s-{query.lower().replace(' ', '-')}/c216/k0"
 
-    _sleep()
+    listings = []
     try:
-        resp = session.get(url, timeout=20)
-        if resp.status_code in (403, 429) or "captcha" in resp.text.lower():
-            print("  [kaz] blocked by anti-bot, skipping")
-            return []
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent=HEADERS["User-Agent"],
+                locale="de-DE",
+            )
+            page = context.new_page()
+            page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            page.wait_for_timeout(2000)
+
+            try:
+                page.click("#gdpr-banner-accept", timeout=3000)
+                page.wait_for_timeout(500)
+            except Exception:
+                pass
+
+            articles = page.query_selector_all("article[data-adid]")
+            for article in articles[:30]:
+                try:
+                    ad_id = article.get_attribute("data-adid") or ""
+                    title_el = article.query_selector("a.ellipsis")
+                    title = title_el.inner_text().strip() if title_el else ""
+                    price_el = article.query_selector("p.aditem-main--middle--price-shipping--price")
+                    price_text = price_el.inner_text().strip() if price_el else ""
+                    price_eur, price_type = _parse_price_text(price_text)
+                    link_el = article.query_selector("a[href*='/s-anzeige/']")
+                    href = link_el.get_attribute("href") if link_el else ""
+                    item_url = f"https://www.kleinanzeigen.de{href}" if href else ""
+                    location_el = article.query_selector("div.aditem-main--top--left")
+                    location = location_el.inner_text().strip() if location_el else ""
+                    year = _extract_year_from_text(title)
+
+                    if ad_id:
+                        listings.append({
+                            "id": f"kaz:{ad_id}",
+                            "platform": "kaz",
+                            "title": title,
+                            "price_eur": price_eur,
+                            "price_type": price_type,
+                            "year": year,
+                            "mileage_km": 0,
+                            "url": item_url,
+                            "location": location,
+                            "image_url": "",
+                            "scraped_at": _now(),
+                        })
+                except Exception:
+                    continue
+            browser.close()
     except Exception as e:
         print(f"  [kaz] scrape failed: {e}")
-        return []
-
-    listings = []
-    for article in soup.select("article[data-adid]"):
-        try:
-            ad_id = article.get("data-adid", "")
-            title_el = article.select_one("a.ellipsis")
-            title = title_el.get_text(strip=True) if title_el else ""
-            price_el = article.select_one("p.aditem-main--middle--price-shipping--price")
-            price_text = price_el.get_text(strip=True) if price_el else ""
-            price_eur, price_type = _parse_price_text(price_text)
-            link_el = article.select_one("a[href*='/s-anzeige/']")
-            href = link_el.get("href", "") if link_el else ""
-            url = f"https://www.kleinanzeigen.de{href}" if href else ""
-            location_el = article.select_one("div.aditem-main--top--left")
-            location = location_el.get_text(strip=True) if location_el else ""
-            year = _extract_year_from_text(title)
-
-            listings.append({
-                "id": f"kaz:{ad_id}",
-                "platform": "kleinanzeigen",
-                "title": title,
-                "price_eur": price_eur,
-                "price_type": price_type,
-                "year": year,
-                "mileage_km": 0,
-                "url": url,
-                "location": location,
-                "image_url": "",
-                "scraped_at": _now(),
-            })
-        except Exception:
-            continue
 
     return listings
 
@@ -317,14 +399,34 @@ def _scrape_mobile_de(query: str, max_year: int | None, max_price: int | None) -
 # ---------------------------------------------------------------------------
 
 def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
+    import base64
     import os
+    import tempfile
+
+    # Decode base64 auth state from environment variable (set as GitHub Secret)
+    tmp_path = None
+    fb_auth_env = os.environ.get("FB_AUTH_STATE", "")
+    if fb_auth_env:
+        try:
+            decoded = base64.b64decode(fb_auth_env).decode("utf-8")
+            tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+            tmp.write(decoded)
+            tmp.close()
+            tmp_path = tmp.name
+            auth_state_path = tmp_path
+        except Exception as e:
+            print(f"  [fb] failed to decode FB_AUTH_STATE: {e}")
+
     if not os.path.exists(auth_state_path):
         print("  [fb] auth state not found, skipping")
         return []
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("  [fb] playwright not installed, skipping")
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
         return []
 
     listings = []
@@ -352,7 +454,7 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                     year = _extract_year_from_text(text)
                     listings.append({
                         "id": f"fb:{item_id.group(1)}",
-                        "platform": "facebook",
+                        "platform": "fb",
                         "title": text.split("\n")[0][:100],
                         "price_eur": price_eur,
                         "price_type": price_type,
@@ -368,6 +470,9 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
             browser.close()
     except Exception as e:
         print(f"  [fb] scrape failed: {e}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
     return listings
 
@@ -406,6 +511,89 @@ def _dedup(listings: list) -> list:
         if l["id"] not in seen:
             seen[l["id"]] = l
     return list(seen.values())
+
+
+# ---------------------------------------------------------------------------
+# Enrichment: description fetch + free image captioning (HF BLIP)
+# ---------------------------------------------------------------------------
+
+def _fetch_description_adevinta(base_url: str, item_id: str) -> str:
+    """Fetch description from listing detail page when API search doesn't return it."""
+    session = _session()
+    try:
+        resp = session.get(f"{base_url}/api/listing/{item_id}", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("description", "") or data.get("body", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _caption_image_hf(image_url: str) -> str:
+    """
+    Free image captioning via Hugging Face Inference API (BLIP model).
+    No API key required. Returns an English caption like 'a red vintage car'.
+    """
+    if not image_url:
+        return ""
+    try:
+        img_data = requests.get(image_url, timeout=10).content
+        resp = requests.post(
+            "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base",
+            headers={"Content-Type": "application/octet-stream"},
+            data=img_data,
+            timeout=35,
+        )
+        if resp.status_code == 200:
+            result = resp.json()
+            if isinstance(result, list) and result:
+                return result[0].get("generated_text", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _enrich_unknown_year_listings(listings: list) -> int:
+    """
+    For listings where year is still 0 after model-code lookup,
+    fetch the description and analyze the photo via HF BLIP.
+    Returns number of listings enriched.
+    """
+    enriched = 0
+    candidates = [
+        l for l in listings
+        if l["year"] == 0 and l.get("profile") in ("mercedes_oldtimer", "om_diesel")
+    ]
+    if not candidates:
+        return 0
+
+    print(f"  Verrijken van {len(candidates)} listings met onbekend jaar (beschrijving + foto)...")
+    for listing in candidates:
+        # 1. Try to fetch full description if not already present
+        if not listing.get("description"):
+            if listing["platform"] == "mp":
+                item_id = listing["id"].replace("mp:", "")
+                listing["description"] = _fetch_description_adevinta("https://www.marktplaats.nl", item_id)
+            elif listing["platform"] == "2dh":
+                item_id = listing["id"].replace("2dh:", "")
+                listing["description"] = _fetch_description_adevinta("https://www.2dehands.be", item_id)
+            _sleep()
+
+        # 2. Free image captioning
+        caption = _caption_image_hf(listing.get("image_url", ""))
+        if caption:
+            listing["image_caption"] = caption
+
+        # 3. Re-try year estimation with description + caption
+        combined = f"{listing['title']} {listing.get('description', '')} {caption}"
+        estimated = _estimate_year_from_title(combined)
+        if estimated > 0:
+            listing["year"] = estimated
+            listing["year_estimated"] = True
+            enriched += 1
+
+    return enriched
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +641,7 @@ def scrape_all_platforms() -> list:
         results = scraper()
         filtered = [
             r for r in results
-            if (r["year"] <= 1987 or r["year"] == 0)
+            if r["year"] > 0 and r["year"] <= 1987
             and (r["price_eur"] <= 10000 or r["price_type"] != "fixed")
         ]
         for r in filtered:
@@ -469,5 +657,19 @@ def scrape_all_platforms() -> list:
     all_listings.extend(fb)
 
     deduped = _dedup(all_listings)
-    print(f"  Totaal na deduplicatie: {len(deduped)}")
+
+    # Pass 1: estimate year from model codes in title (free, instant)
+    enriched = 0
+    for listing in deduped:
+        if listing["year"] == 0 and listing.get("profile") in ("mercedes_oldtimer", "om_diesel"):
+            estimated = _estimate_year_from_title(listing["title"])
+            if estimated > 0:
+                listing["year"] = estimated
+                listing["year_estimated"] = True
+                enriched += 1
+
+    # Pass 2: for still-unknown listings, fetch description + analyze photo (free HF API)
+    enriched += _enrich_unknown_year_listings(deduped)
+
+    print(f"  Totaal na deduplicatie: {len(deduped)} ({enriched} jaar geschat uit modelnaam/beschrijving/foto)")
     return deduped

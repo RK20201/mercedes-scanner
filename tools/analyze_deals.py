@@ -44,9 +44,13 @@ def _pct_below_median(price: int, median: float) -> float:
     return max(0.0, (median - price) / median * 100)
 
 
-def _has_rare_keyword(title: str) -> bool:
-    t = title.lower()
-    return any(kw in t for kw in RARE_KEYWORDS)
+def _has_rare_keyword(listing: dict) -> bool:
+    text = " ".join([
+        listing.get("title", ""),
+        listing.get("description", ""),
+        listing.get("image_caption", ""),
+    ]).lower()
+    return any(kw in text for kw in RARE_KEYWORDS)
 
 
 def _score_listing(listing: dict, median_map: dict) -> int:
@@ -76,7 +80,7 @@ def _score_listing(listing: dict, median_map: dict) -> int:
     if price_type != "fixed":
         score += 1
 
-    rare = _has_rare_keyword(title)
+    rare = _has_rare_keyword(listing)
     if rare:
         score += 2
 
@@ -108,7 +112,7 @@ def _deal_reason(listing: dict, median_map: dict) -> str:
         return "Belastingvrij (40+ jaar)"
 
     parts = []
-    if _has_rare_keyword(title):
+    if _has_rare_keyword(listing):
         parts.append("Zeldzaam model")
     if price_type != "fixed":
         parts.append("Biedprijs (potentieel onontdekt)")
