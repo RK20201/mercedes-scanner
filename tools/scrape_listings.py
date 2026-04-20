@@ -384,17 +384,14 @@ def _scrape_kleinanzeigen_pw_firefox(query: str, max_year: int | None) -> list:
             page.on("response", on_response)
             page.goto(url, timeout=30000, wait_until="domcontentloaded")
 
-            try:
-                page.wait_for_selector("article, a[href*='/s-anzeige/']", timeout=10000)
-            except Exception:
-                page.wait_for_timeout(5000)
+            page.wait_for_timeout(3000)  # let consent banner appear
 
-            # Accept DataDome consent
+            # Accept consent — DataDome banner + fallback for all frames
             try:
                 page.click("#gdpr-banner-accept", timeout=3000)
-                page.wait_for_timeout(3000)
             except Exception:
-                pass
+                _accept_consent_all_frames(page)
+            page.wait_for_timeout(4000)  # wait for listings after consent
 
             if captured_json:
                 print(f"  [kaz/pw] {len(captured_json)} items via API interceptie")
@@ -547,21 +544,15 @@ def _scrape_mobile_de(query: str, max_year: int | None, max_price: int | None) -
             page = context.new_page()
             page.on("response", on_response)
             page.goto(search_url, timeout=30000, wait_until="domcontentloaded")
+            page.wait_for_timeout(3000)  # let consent modal appear
 
-            # Wait for listings to render
-            try:
-                page.wait_for_selector("h2, a[href*='/fahrzeuge/details']", timeout=10000)
-            except Exception:
-                page.wait_for_timeout(5000)
+            # Accept consent — try main frame + all iframes (Sourcepoint CMP uses iframes)
+            _accept_consent_all_frames(page)
+            page.wait_for_timeout(4000)  # wait for listings to render after consent
 
-            # Accept consent if present
+            # If still no links, try once more with a targeted wait
             try:
-                page.evaluate("""
-                    () => document.querySelectorAll('button').forEach(b => {
-                        if (/alle akzept|accept all|alle.*cookie/i.test(b.textContent)) b.click();
-                    })
-                """)
-                page.wait_for_timeout(1500)
+                page.wait_for_selector("a[href*='/fahrzeuge/details'], h2", timeout=8000)
             except Exception:
                 pass
 
@@ -680,24 +671,39 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
             page = context.new_page()
             page.goto(
                 "https://www.facebook.com/marketplace/search/"
-                "?query=mercedes%20oldtimer&sortBy=creation_time_descend",
+                "?query=mercedes+oldtimer&sortBy=creation_time_descend",
                 timeout=30000,
+                wait_until="domcontentloaded",
             )
-            page.wait_for_timeout(4000)
+            page.wait_for_timeout(5000)
 
-            # Dismiss login/cookie dialogs if present
-            for sel in ["[aria-label='Close']", "[data-testid='cookie-policy-manage-dialog-accept-button']",
-                        "button:has-text('Alle accepteren')", "button:has-text('Only allow essential')"]:
+            # Dismiss cookie/login dialogs
+            for sel in [
+                "[aria-label='Close']",
+                "[data-testid='cookie-policy-manage-dialog-accept-button']",
+                "button:has-text('Alle accepteren')",
+                "button:has-text('Accept all')",
+                "button:has-text('Only allow essential')",
+            ]:
                 try:
                     page.click(sel, timeout=1500)
                     page.wait_for_timeout(500)
                 except Exception:
                     continue
 
+            # Wait for marketplace items to appear
+            try:
+                page.wait_for_selector("a[href*='/marketplace/item/']", timeout=10000)
+            except Exception:
+                pass
+
             auth_label = "ingelogd" if has_auth else "zonder login"
+            # Try specific pagelet first, then broader selector, then any item link
             cards = page.query_selector_all("div[data-pagelet='MarketplaceSearchResults'] a[href*='/marketplace/item/']")
             if not cards:
                 cards = page.query_selector_all("a[href*='/marketplace/item/']")
+            if not cards:
+                cards = page.query_selector_all("[href*='/marketplace/item/']")
             print(f"  [fb] {len(cards)} listings gevonden ({auth_label})")
             for card in cards[:30]:
                 try:
@@ -737,6 +743,27 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _accept_consent_all_frames(page) -> None:
+    """Click 'accept all' consent buttons in the main page and all iframes."""
+    js = """
+        () => {
+            const pattern = /alle akzept|accept all|zustimmen|alle cookies|akzeptieren/i;
+            document.querySelectorAll('button, [role="button"]').forEach(b => {
+                if (pattern.test(b.textContent)) b.click();
+            });
+        }
+    """
+    try:
+        page.evaluate(js)
+    except Exception:
+        pass
+    for frame in page.frames:
+        try:
+            frame.evaluate(js)
+        except Exception:
+            pass
+
 
 def _parse_price_text(text: str) -> tuple[int, str]:
     text = text.strip()
