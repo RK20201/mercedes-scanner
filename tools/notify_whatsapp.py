@@ -1,6 +1,13 @@
+import re
 import time
 
 import requests
+
+
+def _to_int(value) -> int:
+    if isinstance(value, int):
+        return value
+    return int(re.sub(r"[^\d]", "", str(value or 0)) or 0)
 
 TELEGRAM_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
@@ -8,10 +15,10 @@ TELEGRAM_URL = "https://api.telegram.org/bot{token}/sendMessage"
 def _format_message(deal: dict) -> str:
     profile = deal.get("profile", "mercedes_oldtimer")
     title = deal.get("title", "")[:60]
-    price_eur = int(deal.get("price_eur", 0) or 0)
+    price_eur = _to_int(deal.get("price_eur", 0))
     price_type = deal.get("price_type", "unknown")
-    mileage = int(deal.get("mileage_km", 0) or 0)
-    year = int(deal.get("year", 0) or 0)
+    mileage = _to_int(deal.get("mileage_km", 0))
+    year = _to_int(deal.get("year", 0))
     location = deal.get("location", "")
     url = deal.get("url", "")
     platform_raw = deal.get("platform", "")
