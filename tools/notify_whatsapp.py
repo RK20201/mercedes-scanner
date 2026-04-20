@@ -8,19 +8,29 @@ TELEGRAM_URL = "https://api.telegram.org/bot{token}/sendMessage"
 def _format_message(deal: dict) -> str:
     profile = deal.get("profile", "mercedes_oldtimer")
     title = deal.get("title", "")[:60]
-    price_eur = deal.get("price_eur", 0)
+    price_eur = int(deal.get("price_eur", 0) or 0)
     price_type = deal.get("price_type", "unknown")
-    mileage = deal.get("mileage_km", 0)
-    year = deal.get("year", 0)
+    mileage = int(deal.get("mileage_km", 0) or 0)
+    year = int(deal.get("year", 0) or 0)
     location = deal.get("location", "")
     url = deal.get("url", "")
-    platform = deal.get("platform", "")
+    platform_raw = deal.get("platform", "")
+    platform_names = {
+        "mp": "Marktplaats",
+        "2dh": "2dehands.be",
+        "as24": "AutoScout24",
+        "kaz": "Kleinanzeigen",
+        "mde": "Mobile.de",
+        "fb": "Facebook",
+    }
+    platform = platform_names.get(platform_raw, platform_raw.title())
     score = deal.get("opportunity_score", 0)
     reason = deal.get("reason", "")
 
     price_str = f"€{price_eur:,}".replace(",", ".") if price_eur > 0 else "Prijs op aanvraag"
     mileage_str = f"{mileage:,} km".replace(",", ".") if mileage > 0 else "km onbekend"
-    year_str = str(year) if year > 0 else "jaar onbekend"
+    year_estimated = deal.get("year_estimated", False)
+    year_str = (f"~{year}" if year_estimated else str(year)) if year > 0 else "jaar onbekend"
 
     if profile == "nl_belastingvrij":
         icon = "🏛️"
@@ -47,7 +57,7 @@ def _format_message(deal: dict) -> str:
         f"{tax_line}"
         f"⭐ Score {score}/10 | {reason}\n"
         f"🔗 {url}\n"
-        f"📍 {platform.title()}"
+        f"📍 {platform}"
     )
 
 
