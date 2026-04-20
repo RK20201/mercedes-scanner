@@ -760,14 +760,13 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(storage_state=auth_state_path) if has_auth else browser.new_context(user_agent=HEADERS["User-Agent"])
             page = context.new_page()
+            # Step 1: load Enschede marketplace to set session location
             page.goto(
-                "https://www.facebook.com/marketplace/search/"
-                "?query=mercedes+oldtimer&sortBy=creation_time_descend"
-                "&latitude=52.2215&longitude=6.8937&radiusKm=250",
+                "https://www.facebook.com/marketplace/enschede/",
                 timeout=30000,
                 wait_until="domcontentloaded",
             )
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(3000)
 
             # Dismiss cookie/login dialogs
             for sel in [
@@ -782,6 +781,28 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                     page.wait_for_timeout(500)
                 except Exception:
                     continue
+
+            # Step 2: change location via the location input if present
+            try:
+                loc_input = page.locator("input[placeholder*='locatie'], input[placeholder*='location'], input[aria-label*='ocatie'], input[aria-label*='ocation']").first
+                if loc_input.is_visible(timeout=3000):
+                    loc_input.triple_click()
+                    loc_input.type("Enschede", delay=80)
+                    page.wait_for_timeout(1500)
+                    page.keyboard.press("ArrowDown")
+                    page.keyboard.press("Enter")
+                    page.wait_for_timeout(2000)
+            except Exception:
+                pass
+
+            # Step 3: search with 250km radius
+            page.goto(
+                "https://www.facebook.com/marketplace/enschede/search/"
+                "?query=mercedes+oldtimer&sortBy=creation_time_descend&radius=250",
+                timeout=30000,
+                wait_until="domcontentloaded",
+            )
+            page.wait_for_timeout(5000)
 
             page_title = page.title()
             current_url = page.url
