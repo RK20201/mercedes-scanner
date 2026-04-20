@@ -746,25 +746,34 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                 cards = page.query_selector_all("a[href*='marketplace']")
             print(f"  [fb] {len(cards)} item-links gevonden na scrollen")
             print(f"  [fb] {len(cards)} listings gevonden ({auth_label})")
-            for card in cards[:30]:
+            seen_fb: set = set()
+            for card in cards[:60]:
                 try:
                     href = card.get_attribute("href") or ""
-                    url = f"https://www.facebook.com{href}" if not href.startswith("http") else href
                     item_id = re.search(r"/item/(\d+)/", href)
-                    if not item_id:
+                    if not item_id or item_id.group(1) in seen_fb:
                         continue
+                    seen_fb.add(item_id.group(1))
+                    # Strip query params from URL to get clean item link
+                    item_url = f"https://www.facebook.com/marketplace/item/{item_id.group(1)}/"
                     text = card.inner_text()
+                    title = text.split("\n")[0].strip()[:100]
                     price_eur, price_type = _parse_price_text(text)
                     year = _extract_year_from_text(text)
+                    # Skip obvious non-car listings (price < €200 fixed, or title too short)
+                    if price_type == "fixed" and 0 < price_eur < 200:
+                        continue
+                    if len(title) < 5:
+                        continue
                     listings.append({
                         "id": f"fb:{item_id.group(1)}",
                         "platform": "fb",
-                        "title": text.split("\n")[0][:100],
+                        "title": title,
                         "price_eur": price_eur,
                         "price_type": price_type,
                         "year": year,
                         "mileage_km": 0,
-                        "url": url,
+                        "url": item_url,
                         "location": "",
                         "image_url": "",
                         "scraped_at": _now(),
