@@ -216,11 +216,15 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
             print("  [as24] __NEXT_DATA__ not found")
             return []
         data = json.loads(script.string)
-        raw_listings = (
-            data.get("props", {})
-            .get("pageProps", {})
-            .get("listings", [])
-        )
+        page_props = data.get("props", {}).get("pageProps", {})
+        raw_listings = page_props.get("listings", [])
+        if not raw_listings:
+            # Try alternate paths AutoScout24 uses after Next.js updates
+            raw_listings = (
+                page_props.get("searchPageProps", {}).get("listings", [])
+                or page_props.get("initialState", {}).get("listings", {}).get("items", [])
+            )
+        print(f"  [as24] pageProps keys: {list(page_props.keys())[:8]}, listings: {len(raw_listings)}")
     except Exception as e:
         print(f"  [as24] scrape failed: {e}")
         return []
@@ -284,7 +288,7 @@ def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
             )
             page = context.new_page()
             page.goto(url, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(3000)
 
             try:
                 page.click("#gdpr-banner-accept", timeout=3000)
@@ -292,7 +296,15 @@ def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
             except Exception:
                 pass
 
+            print(f"  [kaz] page title: {page.title()[:80]}")
+
             articles = page.query_selector_all("article[data-adid]")
+            if not articles:
+                articles = page.query_selector_all("li[data-adid]")
+            if not articles:
+                articles = page.query_selector_all("[data-adid]")
+            print(f"  [kaz] {len(articles)} artikelen gevonden")
+
             for article in articles[:30]:
                 try:
                     ad_id = article.get_attribute("data-adid") or ""
