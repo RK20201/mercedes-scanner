@@ -513,6 +513,29 @@ def _dedup(listings: list) -> list:
     return list(seen.values())
 
 
+_PARTS_URL_MARKERS = ("auto-onderdelen", "ersatzteile", "/teile/", "motorteile", "parts")
+_PARTS_TITLE_KEYWORDS = [
+    "nokkenashuis", "cilinderkop", "cylinderkop", "motorblok",
+    "versnellingsbak", "differentieel",
+    "injectiepomp", "injector", "injectoren",
+    "distributieriem", "distributieketting",
+    "koppakking", "pakking",
+    "brandstofpomp", "waterpomp", "oliepomp",
+    "remschijven", "remschijf", "remblokken",
+    "turbocompressor",
+    " onderdelen", " onderdeel",
+    "wisselstukken",
+]
+
+
+def _is_parts_listing(listing: dict) -> bool:
+    url = listing.get("url", "").lower()
+    if any(m in url for m in _PARTS_URL_MARKERS):
+        return True
+    title = listing.get("title", "").lower()
+    return any(kw in title for kw in _PARTS_TITLE_KEYWORDS)
+
+
 # ---------------------------------------------------------------------------
 # Enrichment: description fetch + free image captioning (HF BLIP)
 # ---------------------------------------------------------------------------
@@ -612,7 +635,10 @@ def scrape_all_platforms() -> list:
         (lambda: _scrape_mobile_de("mercedes", max_year=1998, max_price=None), "mobile.de"),
     ]:
         results = scraper()
-        filtered = [r for r in results if r["year"] <= 1998 or r["year"] == 0]
+        filtered = [
+            r for r in results
+            if (r["year"] <= 1998 or r["year"] == 0) and not _is_parts_listing(r)
+        ]
         for r in filtered:
             r["profile"] = "mercedes_oldtimer"
         print(f"    {name}: {len(filtered)} aanbiedingen")
@@ -626,10 +652,11 @@ def scrape_all_platforms() -> list:
             (lambda e=engine: scrape_2dehands_profile(e), "2dehands"),
         ]:
             results = scraper()
-            for r in results:
+            filtered = [r for r in results if not _is_parts_listing(r)]
+            for r in filtered:
                 r["profile"] = "om_diesel"
-            print(f"    {name} {engine}: {len(results)} aanbiedingen")
-            all_listings.extend(results)
+            print(f"    {name} {engine}: {len(filtered)} aanbiedingen")
+            all_listings.extend(filtered)
             _sleep()
 
     print("  [profiel 3] NL belastingvrij (alle merken ≤ 1987, max €10.000)")
@@ -643,6 +670,7 @@ def scrape_all_platforms() -> list:
             r for r in results
             if r["year"] > 0 and r["year"] <= 1987
             and (r["price_eur"] <= 10000 or r["price_type"] != "fixed")
+            and not _is_parts_listing(r)
         ]
         for r in filtered:
             r["profile"] = "nl_belastingvrij"

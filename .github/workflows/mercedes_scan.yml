@@ -27,9 +27,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Install Playwright (voor optionele Facebook-scraping)
-        run: playwright install chromium --with-deps
-        continue-on-error: true
+      - name: Install Playwright browsers
+        run: python -m playwright install chromium --with-deps
 
       - name: Run Mercedes scanner
         env:
