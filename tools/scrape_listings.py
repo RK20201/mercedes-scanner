@@ -725,13 +725,19 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
     import tempfile
 
     # Decode base64 auth state from environment variable (set as GitHub Secret)
+    # Supports both plain base64 and gzip+base64 (for large auth states > 64KB limit)
     tmp_path = None
     fb_auth_env = os.environ.get("FB_AUTH_STATE", "")
     if fb_auth_env:
         try:
-            decoded = base64.b64decode(fb_auth_env).decode("utf-8")
-            tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-            tmp.write(decoded)
+            import gzip
+            raw = base64.b64decode(fb_auth_env)
+            try:
+                raw = gzip.decompress(raw)
+            except OSError:
+                pass  # not gzipped, use as-is
+            tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".json", delete=False)
+            tmp.write(raw)
             tmp.close()
             tmp_path = tmp.name
             auth_state_path = tmp_path
