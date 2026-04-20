@@ -140,7 +140,7 @@ def analyze_deals(new_listings: list, all_listings: list) -> list:
 
     for listing in new_listings:
         score = _score_listing(listing, median_map)
-        if score >= 6:
+        if score >= 5:
             deal = dict(listing)
             deal["opportunity_score"] = score
             deal["reason"] = _deal_reason(listing, median_map)

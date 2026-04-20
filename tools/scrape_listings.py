@@ -971,8 +971,11 @@ def scrape_all_platforms() -> list:
 
     print("  [profiel 3] NL belastingvrij (alle merken ≤ 1987, max €7.000)")
     for scraper, name in [
-        (lambda: scrape_marktplaats_profile("auto", max_year=1987, max_price=7000), "marktplaats"),
-        (lambda: scrape_2dehands_profile("auto", max_year=1987, max_price=7000), "2dehands"),
+        (lambda: scrape_marktplaats_profile("mercedes", max_year=1987, max_price=7000), "marktplaats mercedes"),
+        (lambda: scrape_marktplaats_profile("volkswagen", max_year=1987, max_price=7000), "marktplaats vw"),
+        (lambda: scrape_marktplaats_profile("bmw", max_year=1987, max_price=7000), "marktplaats bmw"),
+        (lambda: scrape_2dehands_profile("mercedes", max_year=1987, max_price=7000), "2dehands mercedes"),
+        (lambda: scrape_2dehands_profile("volkswagen", max_year=1987, max_price=7000), "2dehands vw"),
         (lambda: _scrape_autoscout24("", max_year=1987, max_price=7000), "autoscout24"),
     ]:
         results = scraper()
