@@ -557,8 +557,13 @@ def _scrape_mobile_de(query: str, max_year: int | None, max_price: int | None) -
                 pass
             page.wait_for_timeout(4000)  # wait for listings to render
 
+            page_title = page.title()
+            if "Zugriff" in page_title or "Access denied" in page_title or not page_title:
+                print("  [mde] geblokkeerd door Akamai (GitHub Actions IP niet toegestaan)")
+                browser.close()
+                return []
             links_check = page.query_selector_all("a[href*='/fahrzeuge/details']")
-            print(f"  [mde] na consent: {len(links_check)} detail-links, titel: {page.title()[:60]}")
+            print(f"  [mde] na consent: {len(links_check)} detail-links")
 
             if captured_json:
                 print(f"  [mde] {len(captured_json)} items via API interceptie")
@@ -695,7 +700,16 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                 except Exception:
                     continue
 
-            print(f"  [fb] pagina titel: {page.title()[:80]}")
+            page_title = page.title()
+            current_url = page.url
+            print(f"  [fb] pagina titel: {page_title[:80]}")
+            print(f"  [fb] url na laden: {current_url[:100]}")
+
+            # Detect expired session (redirect to login page)
+            if "/login" in current_url or page_title.strip() == "Facebook":
+                print("  [fb] sessie verlopen — vernieuw FB_AUTH_STATE in GitHub Secrets")
+                browser.close()
+                return []
 
             # Wait for marketplace items to appear
             try:
@@ -704,7 +718,6 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                 pass
 
             auth_label = "ingelogd" if has_auth else "zonder login"
-            print(f"  [fb] url na laden: {page.url[:100]}")
             # Try specific pagelet first, then broader selector, then any item link
             cards = page.query_selector_all("div[data-pagelet='MarketplaceSearchResults'] a[href*='/marketplace/item/']")
             if not cards:
