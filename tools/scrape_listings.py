@@ -761,8 +761,8 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
             context = browser.new_context(storage_state=auth_state_path) if has_auth else browser.new_context(user_agent=HEADERS["User-Agent"])
             page = context.new_page()
             page.goto(
-                "https://www.facebook.com/marketplace/search/"
-                "?query=mercedes+oldtimer&sortBy=creation_time_descend",
+                "https://www.facebook.com/marketplace/amsterdam/search/"
+                "?query=mercedes+oldtimer&sortBy=creation_time_descend&radiusKm=200",
                 timeout=30000,
                 wait_until="domcontentloaded",
             )
