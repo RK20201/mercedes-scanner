@@ -224,69 +224,52 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
                 page_props.get("searchPageProps", {}).get("listings", [])
                 or page_props.get("initialState", {}).get("listings", {}).get("items", [])
             )
-        print(f"  [as24] pageProps keys: {list(page_props.keys())[:8]}, listings: {len(raw_listings)}")
     except Exception as e:
         print(f"  [as24] scrape failed: {e}")
         return []
 
-    if raw_listings:
-        print(f"  [as24] item voorbeeld: {str(raw_listings[0])[:300]}")
-
     listings = []
-    errors_shown = 0
     for item in raw_listings:
         try:
             item_id = str(item.get("id", ""))
-
-            # Price — may be dict or numeric
-            price_obj = item.get("price", {})
-            if isinstance(price_obj, dict):
-                price_val = price_obj.get("value", 0) or price_obj.get("amount", 0) or 0
-            elif isinstance(price_obj, (int, float)):
-                price_val = int(price_obj)
-            else:
-                price_val = 0
-            price_type = "fixed" if price_val > 0 else "ask"
-
-            # Vehicle info — guard against non-dict values
-            vehicle_raw = item.get("vehicle")
-            vehicle = vehicle_raw if isinstance(vehicle_raw, dict) else {}
-            identifier_raw = item.get("identifier")
-            identifier = identifier_raw if isinstance(identifier_raw, dict) else {}
-
-            make = vehicle.get("make") or identifier.get("make", "")
-            model = vehicle.get("model") or identifier.get("model", "")
-            version = vehicle.get("modelVersion") or identifier.get("version", "")
-            title = " ".join(p for p in [make, model, version] if p).strip() or "AutoScout24"
-
-            # Year
-            year = 0
-            reg = vehicle.get("firstRegistration") or identifier.get("firstRegistration", "")
-            if reg:
-                try:
-                    year = int(str(reg).split("/")[-1])
-                except (ValueError, IndexError):
-                    year = 0
-            if year == 0:
-                url_path = item.get("url", "")
-                m = re.search(r"\b(19[5-9]\d|200\d|201[0-8])\b", url_path)
-                if m:
-                    year = int(m.group(1))
-
-            mileage = int(vehicle.get("mileageInKm", 0) or 0)
-            seller_raw = item.get("seller")
-            location = seller_raw.get("city", "") if isinstance(seller_raw, dict) else ""
-            images = item.get("images") or []
-            image_url = images[0].get("url", "") if images and isinstance(images[0], dict) else ""
-
             if not item_id:
                 continue
+
+            # tracking has the most reliable numeric data in the new structure
+            tracking = item.get("tracking") or {}
+
+            price_val = int(re.sub(r"[^\d]", "", str(tracking.get("price", "") or "")) or 0)
+            price_type = "fixed" if price_val > 0 else "ask"
+
+            vehicle = item.get("vehicle") or {}
+            vehicle = vehicle if isinstance(vehicle, dict) else {}
+            make = vehicle.get("make", "")
+            model = vehicle.get("model", "")
+            version = vehicle.get("modelVersionInput") or vehicle.get("variant", "")
+            title = " ".join(p for p in [make, model, version] if p).strip() or "AutoScout24"
+
+            # Year from tracking.firstRegistration: "02-1998" → 1998
+            year = 0
+            reg = str(tracking.get("firstRegistration", "") or "")
+            if reg:
+                try:
+                    year = int(re.split(r"[-/]", reg)[-1])
+                except (ValueError, IndexError):
+                    year = 0
+
+            mileage = int(re.sub(r"[^\d]", "", str(tracking.get("mileage", "") or "")) or 0)
+
+            location_obj = item.get("location") or {}
+            location = location_obj.get("city", "") if isinstance(location_obj, dict) else ""
+
+            images = item.get("images") or []
+            image_url = images[0] if images and isinstance(images[0], str) else ""
 
             listings.append({
                 "id": f"as24:{item_id}",
                 "platform": "autoscout24",
                 "title": title,
-                "price_eur": int(price_val),
+                "price_eur": price_val,
                 "price_type": price_type,
                 "year": year,
                 "mileage_km": mileage,
@@ -295,10 +278,7 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
                 "image_url": image_url,
                 "scraped_at": _now(),
             })
-        except Exception as e:
-            if errors_shown < 2:
-                print(f"  [as24] parse fout: {e}")
-                errors_shown += 1
+        except Exception:
             continue
 
     return listings
@@ -309,13 +289,77 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
 # ---------------------------------------------------------------------------
 
 def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
+    # Try JSON API first (no browser needed)
+    results = _scrape_kleinanzeigen_api(query, max_year)
+    if results:
+        return results
+    # Fall back to Playwright with iframe-aware consent handling
+    return _scrape_kleinanzeigen_pw(query, max_year)
+
+
+def _scrape_kleinanzeigen_api(query: str, max_year: int | None) -> list:
+    session = _session()
+    params = {
+        "q": query,
+        "c": "216",
+        "sortBy": "SORT_INDEX",
+        "sortOrder": "DECREASING",
+        "pageSize": "30",
+    }
+    if max_year:
+        params["maxFirstRegistrationYear"] = str(max_year)
+    try:
+        resp = session.get("https://www.kleinanzeigen.de/lrp/api/search", params=params, timeout=15)
+        if resp.status_code != 200 or "listings" not in resp.text:
+            return []
+        data = resp.json()
+    except Exception:
+        return []
+
+    listings = []
+    for item in data.get("listings", []):
+        try:
+            price_info = item.get("priceInfo", {})
+            price_cents = price_info.get("priceCents", 0) or 0
+            price_type_raw = (price_info.get("priceType") or "UNKNOWN").upper()
+            price_type = "fixed" if price_type_raw == "FIXED" else "ask" if "BID" in price_type_raw else "unknown"
+
+            attrs = {a["key"]: a.get("value", "") for a in item.get("attributes", [])}
+            year = int(attrs.get("constructionYear", "0") or 0)
+            mileage_str = attrs.get("mileage", "0")
+            mileage = int(re.sub(r"[^\d]", "", mileage_str) or 0)
+
+            item_id = str(item.get("itemId", ""))
+            vip_url = item.get("vipUrl", "")
+            url = vip_url if vip_url.startswith("http") else f"https://www.kleinanzeigen.de{vip_url}"
+            images = item.get("imageUrls", [])
+
+            listings.append({
+                "id": f"kaz:{item_id}",
+                "platform": "kaz",
+                "title": item.get("title", ""),
+                "description": item.get("description", "") or item.get("shortDescription", ""),
+                "price_eur": price_cents // 100,
+                "price_type": price_type,
+                "year": year,
+                "mileage_km": mileage,
+                "url": url,
+                "location": item.get("location", {}).get("cityName", ""),
+                "image_url": images[0] if images else "",
+                "scraped_at": _now(),
+            })
+        except Exception:
+            continue
+    return listings
+
+
+def _scrape_kleinanzeigen_pw(query: str, max_year: int | None) -> list:
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         print("  [kaz] playwright not installed, skipping")
         return []
 
-    # No location code — search all of Germany
     if max_year:
         url = f"https://www.kleinanzeigen.de/s-{query.lower().replace(' ', '-')}/c216+autos.ez_i:,{max_year}/k0"
     else:
@@ -325,45 +369,37 @@ def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(
-                user_agent=HEADERS["User-Agent"],
-                locale="de-DE",
-            )
+            context = browser.new_context(user_agent=HEADERS["User-Agent"], locale="de-DE")
             page = context.new_page()
             page.goto(url, timeout=30000, wait_until="load")
             page.wait_for_timeout(2000)
 
-            for consent_selector in [
-                "#gdpr-banner-accept",
-                "button[data-gdpr-action='accept']",
-                "[aria-label='Alle akzeptieren']",
-                "button.gdpr-consent-accept",
-            ]:
+            # Handle consent — check all frames (banner may be in iframe)
+            for frame in page.frames:
+                for selector in ["#gdpr-banner-accept", "button[data-gdpr-action='accept']"]:
+                    try:
+                        frame.click(selector, timeout=1000)
+                        page.wait_for_timeout(1000)
+                        break
+                    except Exception:
+                        continue
+            # Also try by text in any frame
+            for frame in page.frames:
                 try:
-                    page.click(consent_selector, timeout=2000)
+                    import re as _re
+                    frame.get_by_text(_re.compile(r"akzeptier|accept all", _re.I)).first.click(timeout=1000)
                     page.wait_for_timeout(1000)
                     break
                 except Exception:
                     continue
 
-            # Wait for listings to appear (JavaScript-rendered content)
             try:
-                page.wait_for_selector("a[href*='/s-anzeige/']", timeout=10000)
+                page.wait_for_selector("a[href*='/s-anzeige/']", timeout=8000)
             except Exception:
                 pass
 
-            print(f"  [kaz] page title: {page.title()[:80]}")
-
-            # Debug: sample all hrefs to find correct pattern
-            all_hrefs = page.evaluate("""
-                () => Array.from(document.querySelectorAll('a[href]'))
-                    .map(a => a.href).filter(h => h.includes('kleinanzeigen')).slice(0, 8)
-            """)
-            print(f"  [kaz] sample hrefs: {all_hrefs}")
-
-            # Find listing links (data-adid no longer in DOM)
             links = page.query_selector_all("a[href*='/s-anzeige/']")
-            print(f"  [kaz] {len(links)} advertentielinks gevonden")
+            print(f"  [kaz/pw] {len(links)} links gevonden")
 
             seen_hrefs: set = set()
             for link in links[:40]:
@@ -372,26 +408,15 @@ def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
                     if not href or href in seen_hrefs:
                         continue
                     seen_hrefs.add(href)
-
                     ad_id = href.strip("/").split("/")[-1]
                     item_url = f"https://www.kleinanzeigen.de{href}" if not href.startswith("http") else href
-
                     title = link.inner_text().split("\n")[0].strip()[:100]
                     card_text = link.evaluate(
                         "el => (el.closest('article') || el.closest('li') || "
                         "el.parentElement.parentElement || el.parentElement).innerText"
                     ) or title
-
                     price_eur, price_type = _parse_price_text(card_text)
                     year = _extract_year_from_text(title + " " + card_text)
-
-                    location = ""
-                    for line in card_text.split("\n"):
-                        stripped = line.strip()
-                        if stripped and len(stripped) > 2 and not stripped[0].isdigit():
-                            location = stripped[:50]
-                            break
-
                     if ad_id:
                         listings.append({
                             "id": f"kaz:{ad_id}",
@@ -402,7 +427,7 @@ def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
                             "year": year,
                             "mileage_km": 0,
                             "url": item_url,
-                            "location": location,
+                            "location": "",
                             "image_url": "",
                             "scraped_at": _now(),
                         })
@@ -410,8 +435,7 @@ def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
                     continue
             browser.close()
     except Exception as e:
-        print(f"  [kaz] scrape failed: {e}")
-
+        print(f"  [kaz/pw] scrape failed: {e}")
     return listings
 
 
