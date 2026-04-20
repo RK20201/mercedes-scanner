@@ -711,6 +711,11 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                 browser.close()
                 return []
 
+            # Scroll to trigger lazy loading of marketplace items
+            for _ in range(3):
+                page.mouse.wheel(0, 3000)
+                page.wait_for_timeout(1500)
+
             # Wait for marketplace items to appear
             try:
                 page.wait_for_selector("a[href*='/marketplace/item/']", timeout=10000)
@@ -724,6 +729,7 @@ def _scrape_facebook(auth_state_path: str = "fb_auth_state.json") -> list:
                 cards = page.query_selector_all("a[href*='/marketplace/item/']")
             if not cards:
                 cards = page.query_selector_all("[href*='/marketplace/item/']")
+            print(f"  [fb] {len(cards)} item-links gevonden na scrollen")
             print(f"  [fb] {len(cards)} listings gevonden ({auth_label})")
             for card in cards[:30]:
                 try:
