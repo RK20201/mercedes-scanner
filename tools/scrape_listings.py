@@ -229,12 +229,16 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
         print(f"  [as24] scrape failed: {e}")
         return []
 
+    if raw_listings:
+        print(f"  [as24] item voorbeeld: {str(raw_listings[0])[:300]}")
+
     listings = []
+    errors_shown = 0
     for item in raw_listings:
         try:
             item_id = str(item.get("id", ""))
 
-            # Price — structure changed: may be dict or numeric
+            # Price — may be dict or numeric
             price_obj = item.get("price", {})
             if isinstance(price_obj, dict):
                 price_val = price_obj.get("value", 0) or price_obj.get("amount", 0) or 0
@@ -244,16 +248,18 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
                 price_val = 0
             price_type = "fixed" if price_val > 0 else "ask"
 
-            # Vehicle info — may be under "vehicle" or "identifier"
-            vehicle = item.get("vehicle") or {}
-            identifier = item.get("identifier") or {}
+            # Vehicle info — guard against non-dict values
+            vehicle_raw = item.get("vehicle")
+            vehicle = vehicle_raw if isinstance(vehicle_raw, dict) else {}
+            identifier_raw = item.get("identifier")
+            identifier = identifier_raw if isinstance(identifier_raw, dict) else {}
 
             make = vehicle.get("make") or identifier.get("make", "")
             model = vehicle.get("model") or identifier.get("model", "")
             version = vehicle.get("modelVersion") or identifier.get("version", "")
             title = " ".join(p for p in [make, model, version] if p).strip() or "AutoScout24"
 
-            # Year from firstRegistration or URL
+            # Year
             year = 0
             reg = vehicle.get("firstRegistration") or identifier.get("firstRegistration", "")
             if reg:
@@ -267,8 +273,9 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
                 if m:
                     year = int(m.group(1))
 
-            mileage = vehicle.get("mileageInKm", 0) or 0
-            location = (item.get("seller") or {}).get("city", "")
+            mileage = int(vehicle.get("mileageInKm", 0) or 0)
+            seller_raw = item.get("seller")
+            location = seller_raw.get("city", "") if isinstance(seller_raw, dict) else ""
             images = item.get("images") or []
             image_url = images[0].get("url", "") if images and isinstance(images[0], dict) else ""
 
@@ -282,13 +289,16 @@ def _scrape_autoscout24(query: str, max_year: int | None, max_price: int | None)
                 "price_eur": int(price_val),
                 "price_type": price_type,
                 "year": year,
-                "mileage_km": int(mileage),
+                "mileage_km": mileage,
                 "url": "https://www.autoscout24.com" + item.get("url", ""),
                 "location": location,
                 "image_url": image_url,
                 "scraped_at": _now(),
             })
-        except Exception:
+        except Exception as e:
+            if errors_shown < 2:
+                print(f"  [as24] parse fout: {e}")
+                errors_shown += 1
             continue
 
     return listings
@@ -343,6 +353,13 @@ def _scrape_kleinanzeigen(query: str, max_year: int | None) -> list:
                 pass
 
             print(f"  [kaz] page title: {page.title()[:80]}")
+
+            # Debug: sample all hrefs to find correct pattern
+            all_hrefs = page.evaluate("""
+                () => Array.from(document.querySelectorAll('a[href]'))
+                    .map(a => a.href).filter(h => h.includes('kleinanzeigen')).slice(0, 8)
+            """)
+            print(f"  [kaz] sample hrefs: {all_hrefs}")
 
             # Find listing links (data-adid no longer in DOM)
             links = page.query_selector_all("a[href*='/s-anzeige/']")
